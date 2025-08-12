@@ -1,0 +1,23 @@
+# 가상환경 디렉토리(이름 여러 가지 케이스 커버)
+venv/
+.venv/
+env/
+ENV/
+
+# 파이썬 캐시/빌드 산출물
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+build/
+dist/
+*.egg-info/
+
+# IDE/OS 잡파일
+.idea/
+.vscode/
+.DS_Store
+
+# 환경변수/비밀정보
+.env
+*.env
