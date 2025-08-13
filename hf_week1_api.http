@@ -80,3 +80,15 @@ Content-Type: application/json
   "max_new_tokens": 80,
   "temperature": 0.9
 }
+
+### OCR — 신분증 이미지 업로드
+POST {{baseUrl}}/ocr/id
+Content-Type: multipart/form-data; boundary=BOUNDARY
+
+--BOUNDARY
+Content-Disposition: form-data; name="file"; filename="id_sample.jpeg"
+Content-Type: image/jpeg
+
+< ./id_sample.jpeg
+
+--BOUNDARY--

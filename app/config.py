@@ -1,10 +1,11 @@
 # app/config.py
-# ✅ 환경/디바이스/경고 설정을 한 곳에 모으기
+# ✅ 환경/디바이스/경고 설정 (Flask용 예외)
 
 import os, importlib, gc
 import torch
 import warnings
 from transformers.utils import logging as hf_logging
+from werkzeug.exceptions import RequestEntityTooLarge
 
 # ▶ 경고 억제용 환경변수
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
@@ -19,9 +20,10 @@ MAX_CHARS = 4000
 
 def guard_len(text: str):
     """요청 본문 길이 가드"""
-    from fastapi import HTTPException
+    if text is None:
+        return
     if len(text) > MAX_CHARS:
-        raise HTTPException(status_code=413, detail=f"Input too long (> {MAX_CHARS} chars)")
+        raise RequestEntityTooLarge(description=f"Input too long (> {MAX_CHARS} chars)")
 
 def device_kwargs() -> dict:
     """
@@ -41,3 +43,7 @@ def cleanup_mps_cache():
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         torch.mps.empty_cache()
     gc.collect()
+
+def local_only() -> bool:
+    """HF_HUB_OFFLINE=1 이면 네트워크 금지 + 캐시만 사용."""
+    return os.getenv("HF_HUB_OFFLINE", "0") == "1"

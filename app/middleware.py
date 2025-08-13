@@ -1,33 +1,55 @@
 # app/middleware.py
-# ✅ 요청 로깅/Request-ID + 에러 JSON 통일
+# ✅ 요청 로깅/Request-ID + 에러 JSON 통일 (Flask)
 
 import time, uuid, logging
-from starlette.requests import Request
-from starlette.middleware.base import BaseHTTPMiddleware
-from fastapi import HTTPException
-from fastapi.responses import JSONResponse
+from flask import request, g, jsonify
+from werkzeug.exceptions import HTTPException
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("hf-api")
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        req_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-        request.state.request_id = req_id
-        start = time.perf_counter()
-        response = None
-        try:
-            response = await call_next(request)
-            return response
-        finally:
-            dur_ms = int((time.perf_counter() - start) * 1000)
-            log.info(f'{{"lvl":"info","rid":"{req_id}","m":"{request.method}","p":"{request.url.path}","status":{getattr(response,"status_code",500)},"ms":{dur_ms}}}')
+def install_middlewares(app):
+    @app.before_request
+    def _before():
+        rid = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        g.request_id = rid
+        g._start_ts = time.perf_counter()
 
-async def http_exc_handler(request: Request, exc: HTTPException):
-    rid = getattr(request.state, "request_id", None)
-    return JSONResponse(status_code=exc.status_code, content={"error": {"type":"http","message":exc.detail,"request_id":rid}})
+    @app.after_request
+    def _after(response):
+        # 로깅
+        dur_ms = int((time.perf_counter() - getattr(g, "_start_ts", time.perf_counter())) * 1000)
+        log.info(
+            f'{{"lvl":"info","rid":"{getattr(g,"request_id",None)}","m":"{request.method}",'
+            f'"p":"{request.path}","status":{response.status_code},"ms":{dur_ms}}}'
+        )
+        # 리스폰스 헤더에 Request-ID 부착
+        if getattr(g, "request_id", None):
+            response.headers["X-Request-ID"] = g.request_id
+        return response
 
-async def unhandled_exc_handler(request: Request, exc: Exception):
-    rid = getattr(request.state, "request_id", None)
-    log.error(f'{{"lvl":"error","rid":"{rid}","error":"{type(exc).__name__}","msg":"{str(exc)}"}}')
-    return JSONResponse(status_code=500, content={"error": {"type": type(exc).__name__, "message": str(exc), "request_id": rid}})
+def install_error_handlers(app):
+    @app.errorhandler(HTTPException)
+    def _http_exc(e: HTTPException):
+        rid = getattr(g, "request_id", None)
+        return jsonify({
+            "error": {
+                "type": "http",
+                "code": e.code,
+                "name": e.name,
+                "message": e.description,
+                "request_id": rid
+            }
+        }), e.code
+
+    @app.errorhandler(Exception)
+    def _unhandled(e: Exception):
+        rid = getattr(g, "request_id", None)
+        log.error(f'{{"lvl":"error","rid":"{rid}","error":"{type(e).__name__}","msg":"{str(e)}"}}')
+        return jsonify({
+            "error": {
+                "type": type(e).__name__,
+                "message": str(e),
+                "request_id": rid
+            }
+        }), 500

@@ -5,3 +5,5 @@ huggingface_hub>=0.23
 accelerate>=0.26
 torch>=2.3
 sentencepiece>=0.1.99
+Pillow              # 이미지 열기/크롭
+python-multipart    # FastAPI 파일 업로드 파싱
