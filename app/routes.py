@@ -1,16 +1,15 @@
-# app/routes.py — APIBlueprint + Pydantic 타입힌트로 OAS3 자동생성
 from __future__ import annotations
 
 import io
-import re
 from typing import Optional
 
+import numpy as np
 import torch
 from PIL import Image, ImageOps
-import numpy as np
 from flask import Response, stream_with_context
 from flask_openapi3 import APIBlueprint, Tag, FileStorage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+from pydantic import Field
 from transformers import TextIteratorStreamer
 
 from cache import CACHE, make_key
@@ -37,6 +36,129 @@ class OCRQuery(BaseModel):
 
 class OCRForm(BaseModel):
     file: FileStorage
+
+
+class KRIDFields(BaseModel):
+    name: Optional[str] = None
+    rrn_masked: Optional[str] = None
+    issue_date: Optional[str] = None
+    issuer: Optional[str] = None
+    address: Optional[str] = None
+
+
+def _normalize_kr_ocr(s: str) -> str:
+    """한글 주민등록증에서 자주 나오는 OCR 오탈자 간단 보정"""
+    rep = [
+        (r"서용특별시", "서울특별시"),
+        (r"미표구", "마포구"),
+        (r"(?<=\d)중\b", "층"),  # 8중 -> 8층
+        (r"\s{2,}", " "),  # 다중 공백 축소
+    ]
+    import re
+    t = s
+    for pat, repl in rep:
+        t = re.sub(pat, repl, t)
+    return t.strip()
+
+
+def _parse_id_fields_kr(text: str) -> KRIDFields:
+    """
+    주민등록증 OCR 텍스트 파서(한글):
+    - name: '주민등록증' 다음 또는 주민번호 이전 라인의 짧은 한글 이름(2~6자)
+    - rrn_masked: XXXXXX-*******
+    - issue_date: YYYY-MM-DD (예: '2018. 1. 28.' -> '2018-01-28')
+    - issuer: '서울특별시 마포구청장' 등
+    - address: 주민번호가 있는 라인에서 주민번호 뒤쪽, 없으면 후보 라인 중 주소 토큰 포함 & 발급기관/날짜 제외
+    """
+    import re
+    # 원본 정리
+    raw = re.sub(r"[^\S\r\n]+", " ", text).strip()
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+
+    # 주민등록번호 탐색 (라인/인덱스 기록)
+    rrn_masked, rrn_line_idx, rrn_span = None, None, None
+    rrn_pat = re.compile(r"(?P<rrn>\d{6}[ -]?\d{7})")
+    for i, ln in enumerate(lines):
+        m = rrn_pat.search(ln)
+        if m:
+            rrn_raw = m.group("rrn").replace(" ", "").replace("-", "")
+            rrn_masked = f"{rrn_raw[:6]}-" + "*" * 7
+            rrn_line_idx = i
+            rrn_span = m.span()
+            break
+
+    # 발급일
+    issue_date = None
+    m_date = re.search(r"((19|20)?\d{2})\.\s*(\d{1,2})\.\s*(\d{1,2})\.", raw)
+    if m_date:
+        y = m_date.group(1)
+        m = int(m_date.group(3));
+        d = int(m_date.group(4))
+        if len(y) == 2:  # '18.' 같은 2자리 연도 → 2018/1918 추정
+            y = "20" + y if int(y) < 50 else "19" + y
+        issue_date = f"{int(y):04d}-{m:02d}-{d:02d}"
+
+    # 이름
+    name = None
+    before_rrn_text = raw if rrn_line_idx is None else "\n".join(lines[:rrn_line_idx + 1])
+    m_name = re.search(r"주민등록증\s*([가-힣]{2,6})", before_rrn_text)
+    if m_name:
+        name = m_name.group(1)
+    else:
+        # 숫자/한자/영문 거의 없는 짧은 한글 라인
+        for ln in lines[: (rrn_line_idx if rrn_line_idx is not None else len(lines))]:
+            if 2 <= len(ln) <= 6 and re.fullmatch(r"[가-힣]{2,6}", ln):
+                name = ln
+                break
+
+    # 발급기관 (오탈 보정 후 탐색)
+    norm_all = _normalize_kr_ocr(raw)
+    m_issuer = re.search(r"([가-힣]{2,10}(특별시|광역시|도))\s*[가-힣]{1,3}구청장", norm_all)
+    issuer = m_issuer.group(0) if m_issuer else None
+
+    # 주소 추출
+    address = None
+    if rrn_line_idx is not None and rrn_span is not None:
+        # 주민번호가 포함된 라인의 주민번호 '뒤쪽'을 1순위 주소 후보로 사용
+        rrn_line = lines[rrn_line_idx]
+        tail = rrn_line[rrn_span[1]:].strip()  # 주민번호 이후
+        if tail:
+            address = tail
+
+    # 1순위 주소 후보가 없으면, 후보 라인에서 선택
+    if not address:
+        # 후보: 주민번호 라인 이후 2줄 우선 + 전체 라인
+        candidates = []
+        if rrn_line_idx is not None:
+            candidates.extend(lines[rrn_line_idx + 1: rrn_line_idx + 3])
+        candidates.extend(lines)
+
+        addr_tokens1 = r"(특별시|광역시|도|시)"
+        addr_tokens2 = r"(구|군|동|읍|면|로|길)"
+        exclude_tokens = r"(청장|시장|군수|구청장|면장|읍장)"
+        date_like = re.compile(r"(\d{2,4})\.\s*\d{1,2}\.\s*\d{1,2}\.")  # 2018. 1. 28.
+
+        for ln in candidates:
+            if date_like.search(ln):  # 날짜라인 제외
+                continue
+            if re.search(exclude_tokens, ln):  # 발급기관/직함 제외
+                continue
+            # 두 그룹 토큰을 모두 포함(전방탐색)해야 주소로 인정
+            if re.search(addr_tokens1, ln) and re.search(addr_tokens2, ln):
+                address = ln
+                break
+
+    # 주소 오탈 보정 + 공백 정리
+    if address:
+        address = _normalize_kr_ocr(address)
+
+    return KRIDFields(
+        name=name,
+        rrn_masked=rrn_masked,
+        issue_date=issue_date,
+        issuer=issuer,
+        address=address,
+    )
 
 
 # --------- 엔드포인트들 ---------
@@ -204,20 +326,7 @@ def ocr_id(form: OCRForm, query: OCRQuery):
 
     result = {"text": text, "backend": "easyocr"}
     if query.parse:
-        def _parse_id_fields(text: str):
-            def find(pat, flags=0):
-                m = re.search(pat, text, flags)
-                return m.group(1).strip() if m else None
-            name = find(r"(?:Name|Full\s*Name)[:\-]?\s*([A-Z][A-Za-z\s\.'\-]{1,40})")
-            dob  = find(r"(?:DOB|Birth\s*Date)[:\-]?\s*([0-9]{2,4}[-./][0-9]{1,2}[-./][0-9]{1,2})")
-            idno = find(r"(?:ID\s?(?:No|#)?|Identification(?:\s*No)?)[:\-#]?\s*([A-Z0-9\-]{6,})")
-            if idno and len(idno) > 4:
-                import re as _re
-                idno_masked = _re.sub(r"(?<=..).(?=..)", "*", idno)
-            else:
-                idno_masked = idno
-            return {"name": name, "dob": dob, "id_number_masked": idno_masked}
-        result["fields"] = _parse_id_fields(text)
+        fields = _parse_id_fields_kr(text)
+        result["fields"] = fields.model_dump(exclude_none=True)
 
     return result
-
