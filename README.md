@@ -169,8 +169,3 @@ app/
 ├── utils.py          # 입력 가드/이미지 바이트 가드/crop 파서
 └── __init__.py       # Flask app 재노출
 ```
-
-필요하면 Dockerfile·배포 가이드도 추가하겠습니다.
-
-```
-```

@@ -1,5 +1,4 @@
 # app/cache.py
-# ✅ 초간단 LRU 캐시 (요약/번역 재사용에 효과)
 
 from collections import OrderedDict
 from typing import Any, Tuple

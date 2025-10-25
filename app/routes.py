@@ -312,7 +312,7 @@ def ocr_id(form: OCRForm, query: OCRQuery):
         s = 1280 / long_side
         img = img.resize((int(img.width * s), int(img.height * s)))
 
-    # ✅ EasyOCR 입력: numpy 배열로 변환
+    # EasyOCR 입력: numpy 배열로 변환
     np_img = np.array(img)
 
     reader = get_ocr_easyocr()
